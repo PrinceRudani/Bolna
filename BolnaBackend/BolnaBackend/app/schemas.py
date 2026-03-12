@@ -2,6 +2,10 @@ from pydantic import BaseModel
 from datetime import datetime
 
 
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
 class SyncRequest(BaseModel):
     agent_id: str
     from_date: datetime
@@ -10,6 +14,11 @@ class SyncRequest(BaseModel):
     page_size: int = 20
 
 
+class DepartmentRequest(BaseModel):
+    department: str
+    page_number: int = 1
+    page_size: int = 50
+    
 class CallRequest(BaseModel):
     token: str  # User's unique token to lookup phone number
 

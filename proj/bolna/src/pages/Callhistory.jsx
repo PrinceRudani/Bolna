@@ -2,7 +2,6 @@ import { ArrowDown, ArrowUp, ArrowUpDown, CassetteTape, ChevronLeft, ChevronRigh
 import { use, useEffect, useMemo } from "react";
 import { useState } from "react";
 import api from "../utils/axios";
-import axios from "axios";
 
 const StatusBadge = ({ status }) => {
   if (status === "Completed") {
@@ -52,7 +51,7 @@ const RecordingCard = ({ data }) => {
 
         if (!url) return;
 
-        const response = await axios.get(url, {
+        const response = await api.get(url, {
           responseType: "blob",   // Important for audio
         });
 

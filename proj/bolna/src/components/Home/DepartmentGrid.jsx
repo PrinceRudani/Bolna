@@ -1,6 +1,6 @@
 import { useNavigate } from "react-router-dom";
 import { useEffect, useState } from "react";
-import axios from "axios";
+import api from "../../utils/axios";
 
 // Departments Grid Component
 const DepartmentGrid = () => {
@@ -15,8 +15,8 @@ const DepartmentGrid = () => {
 
             setLoading(true);
 
-            const response = await axios.get(
-                "https://l8vc9g1h-8000.inc1.devtunnels.ms/department-counts"
+            const response = await api.get(
+                "/department-counts"
             );
 
             setDepartments(response.data);

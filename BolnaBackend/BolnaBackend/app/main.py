@@ -1,10 +1,12 @@
-from fastapi import FastAPI, HTTPException, Request
+from app.service.auth_service import create_access_token, get_user_by_email, verify_password
+from fastapi import FastAPI, HTTPException, Request, Query
 import requests
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
-from app.schemas import SyncRequest, CallRequest, ResolutionCallRequest, GeminiSummaryRequest, CallHistoryRequest
+from app.schemas import LoginRequest, SyncRequest, CallRequest, ResolutionCallRequest, GeminiSummaryRequest, CallHistoryRequest, DepartmentRequest
 from app.services import (
+    fetch_department_counts,
     fetch_from_bolna,
     store_executions,
     get_all_ai_summaries,
@@ -14,6 +16,7 @@ from app.services import (
     get_bolna_bearer_token,
     get_bolna_headers,
     get_call_history,
+    get_ai_summaries_by_department
 )
 from app.voice_agent import make_resolution_call
 
@@ -23,8 +26,8 @@ app = FastAPI(title="Bolna Sync Service")
 origins = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
-    "https://l8vc9g1h-5173.inc1.devtunnels.ms",
-    "https://13.203.39.153"
+    "https://13.203.39.153",
+    "https://l8vc9g1h-5173.inc1.devtunnels.ms"
 ]
 
 app.add_middleware(
@@ -35,6 +38,24 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.post("/login")
+def login_user(request: LoginRequest):
+
+    user = get_user_by_email(request.email)
+
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    if not verify_password(request.password, user["password"]):
+        raise HTTPException(status_code=401, detail="Invalid password")
+
+    access_token = create_access_token({"sub": user["email"]})
+
+    return {
+        "message": "Login successful",
+        "access_token": access_token,
+        "token_type": "bearer"
+    }
 @app.post("/sync")
 def sync_data(request: SyncRequest):
     try:
@@ -59,20 +80,49 @@ async def call_history(request: CallHistoryRequest, raw_request: Request):
     """
     Fetch call history with optional filters.
     Returns list of call executions.
+
+    This endpoint can also be used by Bolna to post a single execution record.
+    When a payload includes a transcript, we store the execution and run
+    a Gemini extraction pipeline (stored into `ai_summary`).
     """
     try:
-        raw_body = await raw_request.body()
-        print("Raw payload:", raw_body.decode('utf-8'))
+        raw_body = await raw_request.json()
+
+        agent_id = request.agent_id or raw_body.get("agent_id")
+
+        # Persist call execution for later display/storage.
+        # This is safe to call even when the payload is a lightweight query
+        # (it will simply no-op if there is no `id` in the payload).
+        if agent_id and raw_body.get("id"):
+            try:
+                store_executions(agent_id, [raw_body])
+            except Exception:
+                # Do not block the endpoint if DB writes fail.
+                pass
+
+        transcript = raw_body.get("transcript")
+        if transcript:
+            try:
+                ai_data = call_gemini_with_summary(transcript)
+
+                # Make sure we can relate the AI summary back to the execution
+                # record (when available).
+                if raw_body.get("id"):
+                    ai_data["related_execution_id"] = raw_body.get("id")
+
+                store_ai_summary(ai_data)
+            except Exception:
+                # Gemini / DB failures should not break this endpoint.
+                pass
 
         data = get_call_history(
-            agent_id=request.agent_id,
+            agent_id=agent_id,
             from_date=request.from_date,
             to_date=request.to_date,
             page_number=request.page_number,
             page_size=request.page_size
         )
-        print(request.dict())
-        print(" data:", data)
+
         return {
             "status": "success",
             "data": data,
@@ -120,15 +170,46 @@ def resolution_call(request: ResolutionCallRequest):
 
 
 @app.get("/ai-summary")
-def list_ai_summary():
-    """
-    Return all AI summaries stored in the ai_summary table.
-    """
+def list_ai_summary(
+    page_number: int = Query(1),
+    page_size: int = Query(50)
+):
     try:
-        return get_all_ai_summaries()
+        return get_all_ai_summaries(page_number, page_size)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/ai-summary-by-department")
+def ai_summary_by_department(payload: DepartmentRequest):
+    """
+    Return AI summaries filtered by department.
+    If department = 'all', return all records.
+    """
+
+    try:
+        print(f"Fetching AI summaries for department: {payload.department}, page: {payload.page_number}, size: {payload.page_size}")    
+        if payload.department == "All Department":
+            return get_all_ai_summaries(
+                payload.page_number,
+                payload.page_size
+            )
+
+        return get_ai_summaries_by_department(
+            payload.department,
+            payload.page_number,
+            payload.page_size
+        )
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/department-counts")
+def get_department_counts():
+    try:
+        return fetch_department_counts()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+        
 
 @app.post("/gemini-summary")
 def gemini_summary(request: GeminiSummaryRequest):

@@ -82,6 +82,8 @@ def call_gemini_with_summary(summary: str) -> dict:
                             "}\n"
                             "Rules:\n"
                             "- Respond with valid JSON only (no extra text, no explanations).\n"
+                            "- Always respond in English. If the input is in another language, translate it into English first before extracting.\n"
+                            "- Do NOT include any Gujarati, Hindi, or other non-English text in the output.\n"
                             "- If any field is unknown, still include it with a best-effort guess or null.\n\n"
                             f"Call summary:\n{summary}"
                         )
@@ -91,10 +93,18 @@ def call_gemini_with_summary(summary: str) -> dict:
         ]
     }
 
+    # Debug/diagnostic prints (remove or disable in production)
+    print("[gemini] GEMINI_API_KEY set:", bool(settings.GEMINI_API_KEY))
+    print("[gemini] Request payload (truncated):", str(payload)[:800])
+
     params = {"key": settings.GEMINI_API_KEY}
     headers = {"Content-Type": "application/json"}
 
     response = requests.post(url, params=params, headers=headers, json=payload)
+
+    print("[gemini] HTTP status:", response.status_code)
+    print("[gemini] Response text (truncated):", response.text[:1200])
+
     response.raise_for_status()
     data = response.json()
 
@@ -138,6 +148,10 @@ def call_gemini_with_summary(summary: str) -> dict:
 def store_ai_summary(ai_data: dict):
     """
     Store a structured AI summary into the ai_summary table.
+
+    Avoid creating duplicate rows when the same execution is processed multiple times.
+    If `related_execution_id` is provided, we treat it as a natural key and avoid
+    inserting a second row for the same execution.
     """
     connection = get_connection()
     cursor = connection.cursor()
@@ -150,6 +164,16 @@ def store_ai_summary(ai_data: dict):
         if created_at_value:
             # Handle possible trailing 'Z'
             created_at = datetime.fromisoformat(created_at_value.replace("Z", ""))
+
+        related_execution_id = ai_data.get("related_execution_id")
+        if related_execution_id:
+            cursor.execute(
+                "SELECT 1 FROM ai_summary WHERE related_execution_id = %s LIMIT 1",
+                (related_execution_id,),
+            )
+            if cursor.fetchone():
+                # Already stored for this execution; avoid duplicates.
+                return
 
         query = """
         INSERT INTO ai_summary (
@@ -175,7 +199,7 @@ def store_ai_summary(ai_data: dict):
                 ai_data.get("transcript"),
                 ai_data.get("assigned_to"),
                 created_at,
-                ai_data.get("related_execution_id"),
+                related_execution_id,
             ),
         )
 
@@ -249,10 +273,46 @@ def store_executions(agent_id: str, executions: list):
         connection.close()
 
 
-def get_all_ai_summaries():
-    """
-    Fetch all rows from ai_summary as a list of dicts.
-    """
+def get_all_ai_summaries(page_number: int = 1, page_size: int = 50):
+    connection = get_connection()
+    cursor = connection.cursor()
+
+    try:
+        query = """
+        SELECT
+            a.id,
+            a.reporter_name,
+            a.reporter_phone,
+            a.area,
+            a.complaint_type,
+            a.transcript,
+            a.assigned_to,
+            a.created_at,
+            a.related_execution_id,
+            a.inserted_at,
+            ce.status AS call_status,
+            ce.user_number AS call_user_number
+        FROM ai_summary AS a
+        LEFT JOIN call_executions AS ce
+        ON ce.id = a.related_execution_id
+        ORDER BY a.inserted_at DESC, a.id DESC
+        LIMIT %s OFFSET %s
+        """
+
+        offset = (page_number - 1) * page_size
+
+        cursor.execute(query, (page_size, offset))
+        rows = cursor.fetchall()
+
+        return rows
+
+    finally:
+        cursor.close()
+        connection.close()
+
+
+def get_ai_summaries_by_department(department: str, page_number: int = 1, page_size: int = 50):
+
     connection = get_connection()
     cursor = connection.cursor(pymysql.cursors.DictCursor)
 
@@ -274,9 +334,15 @@ def get_all_ai_summaries():
         FROM ai_summary AS a
         LEFT JOIN call_executions AS ce
             ON ce.id = a.related_execution_id
-        ORDER BY a.created_at DESC, a.id DESC
+        WHERE a.complaint_type LIKE %s
+        ORDER BY a.inserted_at DESC, a.id DESC
+        LIMIT %s OFFSET %s
         """
-        cursor.execute(query)
+
+        offset = (page_number - 1) * page_size
+        search_pattern = f"%{department}%"
+
+        cursor.execute(query, (search_pattern, page_size, offset))
         rows = cursor.fetchall()
         return rows
 
@@ -284,7 +350,56 @@ def get_all_ai_summaries():
         cursor.close()
         connection.close()
 
+def fetch_department_counts():
 
+    connection = get_connection()
+    cursor = connection.cursor(pymysql.cursors.DictCursor)
+
+    try:
+
+        query = """
+        SELECT 
+            department,
+            COUNT(*) AS total_complaints
+        FROM (
+            SELECT
+                CASE
+                    WHEN complaint_type LIKE '%water%' THEN 'Water'
+                    WHEN complaint_type LIKE '%streetlight%' THEN 'Streetlights'
+                    WHEN complaint_type LIKE '%animal%' THEN 'Animals'
+                    WHEN complaint_type LIKE '%trash%' OR complaint_type LIKE '%garbage%' THEN 'Garbage'
+                    WHEN complaint_type LIKE '%pothole%' OR complaint_type LIKE '%road%' THEN 'Roads'
+                    ELSE 'Other'
+                END AS department
+            FROM ai_summary
+        ) AS categorized
+        GROUP BY department
+        """
+
+        cursor.execute(query)
+        rows = cursor.fetchall()
+
+        response = []
+
+        for row in rows:
+            department = row["department"]
+            total = row["total_complaints"]
+
+            response.append({
+                "id": department,
+                "name": department,
+                "total": total,
+                "resolved": "--",
+                "inProgress": "--",
+                "open": total
+            })
+
+        return response
+
+    finally:
+        cursor.close()
+        connection.close()       
+        
 def get_call_history(agent_id=None, from_date=None, to_date=None, page_number=1, page_size=20):
     """
     Fetch call executions with optional filters.
