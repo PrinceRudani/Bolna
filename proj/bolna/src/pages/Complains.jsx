@@ -3,7 +3,7 @@
 // ===============================================
 import { useNavigate } from "react-router-dom";
 import { useState, useEffect } from "react";
-import axios from "axios";
+
 // Status Badge Component
 const StatusBadge = ({ status }) => {
     const statusConfig = {
@@ -26,6 +26,7 @@ const StatusBadge = ({ status }) => {
 };
 
 import { useSearchParams } from "react-router-dom";
+import api from "../utils/axios";
 
 // Complaint Filters Component
 
@@ -36,8 +37,8 @@ const ComplaintFilters = ({ filters, setFilters, department }) => {
     const fetchDepartmentCounts = async () => {
         try {
 
-            const response = await axios.get(
-                "https://l8vc9g1h-8000.inc1.devtunnels.ms/department-counts"
+            const response = await api.get(
+                "/department-counts"
             );
 
             setDepartments(([{ name: 'All Departments' }, ...response.data]).map(dept => dept.name));
@@ -677,14 +678,14 @@ const ComplaintsDashboard = () => {
 
             if (department === "All Departments" || !department) {
 
-                response = await axios.get(`${API_BASE}/ai-summary`, {
+                response = await api.get("/ai-summary", {
                     headers: { accept: "application/json" }
                 });
 
             } else {
 
-                response = await axios.post(
-                    `${API_BASE}/ai-summary-by-department`,
+                response = await api.post(
+                    "/ai-summary-by-department",
                     {
                         department: department,
                         page_number: 1,
